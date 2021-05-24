@@ -1,0 +1,293 @@
+Importing the Libraries
+
+import tensorflow as tf
+from tensorflow import keras 
+import tensorflow.keras as backend
+from keras.models import Model
+from keras.models import load_model
+from keras.layers import LSTM
+from keras.layers import Input
+from keras.layers import Dropout
+from keras.layers import Dense
+from keras.layers import Embedding
+from keras.utils import plot_model
+from keras.utils import to_categorical
+from keras.applications import InceptionV3
+from keras.applications.inception_v3 import preprocess_input
+from keras.preprocessing.image import load_img
+from keras.preprocessing.image import img_to_array
+from keras.preprocessing.sequence import pad_sequences
+from keras.layers.merge import add
+from nltk.translate.bleu_score import corpus_bleu
+import json
+import numpy as np
+import os
+import string
+from os import listdir
+import pickle
+from pickle import dump
+
+
+
+Importing the text data
+
+file=open('/content/drive/MyDrive/flickrtext/Flickr8k.token.txt','r')
+doc=file.read()
+file.close()
+
+desc_dict=dict()
+for line in doc.split('\n'):
+    tokens=line.split()
+    image_id=tokens[0].split('.')
+    hu=image_id[0]
+    image_desc=tokens[1:]
+    image_desc=' '.join(image_desc)
+  
+  
+    if hu not in desc_dict.keys():
+        desc_dict[image_id[0]]=[]
+    desc_dict[image_id[0]].append(image_desc)
+
+
+len(desc_dict.keys())
+
+Data Cleaning (Removing punctuations , symbols)
+
+translation_table=str.maketrans('','',string.punctuation)
+
+for key,item in desc_dict.items():
+    for i in range(len(desc_dict[key])):
+        desc=item[i]
+        desc=desc.split()
+        desc=[word.lower() for word in desc]
+        desc=[word.translate(translation_table) for word in desc]
+        desc=[word for word in desc if word.isalpha()]
+        item[i]='startseq '+ ' '.join(desc)+ ' endseq'
+
+
+desc_dict
+
+vocabulary=set()
+for key in desc_dict.keys():
+    [vocabulary.update(item.split()) for item in desc_dict[key]]
+print(len(vocabulary))
+
+Words Which occurs atleast 10 times are used to predict the captions
+
+All_captions=[]
+word_counts={}
+for key,items in desc_dict.items():
+    for i in range(len(desc_dict[key])):
+        All_captions.append(items[i])
+#Consider words which are repeated at least 10 times for prediction
+for  line in All_captions:
+    line=line.split()
+    for w in line:
+        if w not in word_counts:
+            word_counts[w]=1
+        else:
+            word_counts[w]+=1
+vocab=[w for w in word_counts if word_counts[w]>=10]
+vocab_size=len(vocab)        
+print(len(vocab),vocab)
+
+Word to index conversion
+
+wordtoindex={}
+indextoword={}
+k=0
+for w in vocab:
+    wordtoindex[w]=k
+    indextoword[k]=w
+    k=k+1
+
+max_length_of_caption=0
+for key in desc_dict.keys():
+    if (max(len(d.split()) for d in desc_dict[key])>max_length_of_caption):
+        max_length_of_caption=max(len(d.split()) for d in desc_dict[key])
+
+print(max_length_of_caption)
+
+No of training and test images
+
+def load_imageset(filepath):
+    i=0
+    doc=open(filepath,'r')
+    for line in doc:
+        i=i+1
+    return i
+print('The no of training images ',load_imageset('/content/drive/MyDrive/flickrtext/Flickr_8k.trainImages.txt'),'\n')
+print('The no of images in test set',load_imageset('/content/drive/MyDrive/flickrtext/Flickr_8k.testImages.txt'),'\n')
+
+Extracting image sequence from inception model
+
+def image_sequence_generator():
+    image_sequence={}
+    model=InceptionV3(weights='imagenet')
+    model=Model(inputs=model.input,outputs=model.layers[-2].output)
+    file_path='/content/drive/MyDrive/Flicker8k_Dataset'
+    for img in listdir(file_path):
+        image_path=file_path+'/'+img
+        image = load_img(image_path,target_size=(299,299))
+        image = img_to_array(image)
+        image = image.reshape((1,image.shape[0],image.shape[1],image.shape[2]))
+        image = preprocess_input(image)
+        sequence=model.predict(image,verbose=0)
+        image_sequence[img.split('.')[0]]=sequence
+    return image_sequence
+image_sequence=image_sequence_generator()
+
+dump(image_sequence,open('imagesequence.pkl','wb'))
+
+Data Generation
+
+
+def create_sequence(captions,max_length_of_caption,vocab_size,image_input):
+    image_sequence,input_sequence,output_sequence=list(),list(),list()
+    for caption in captions:
+        caption=caption.split(' ')
+        caption=[wordtoindex[w] for w in caption if w in vocab]
+        for i in range(len(caption)-1):
+            in_sequence=caption[:i+1]
+            in_sequence=pad_sequences([in_sequence],maxlen=37,padding='post')[0]
+            out_sequence=caption[i+1]
+            out_sequence=to_categorical([out_sequence],num_classes=vocab_size)[0]
+            input_sequence.append(in_sequence)
+            output_sequence.append(out_sequence)
+            image_sequence.append(image_input)
+    return np.array(image_sequence),np.array(input_sequence),np.array(output_sequence)
+
+file=open('/content/drive/MyDrive/flickrtext/Flickr_8k.trainImages.txt','r')
+document=file.readlines()
+
+def generate(desc_dict,max_length_of_caption,vocab_size):
+    while 1:
+        for photo in document:
+            photo=photo.split('.')[0]
+            image_input=features[photo]
+            image_input=image_input.reshape(2048,)
+            captions=desc_dict[photo]
+            image_sequence,input_sequence,output_sequence=create_sequence(captions,max_length_of_caption,vocab_size,image_input)
+            yield [image_sequence,input_sequence],output_sequence    
+    
+
+def load_image_sequence():
+    file_path='/content/drive/MyDrive/imagesequence.pkl'
+    all_features=pickle.load(open(file_path,'rb'))
+    features={key:all_features[key] for key in all_features}
+    return features
+features=load_image_sequence()
+
+features
+
+Define the Model
+
+def def_model():
+    #feature extraction from image
+    inputs1=Input(shape=(2048,))
+    fe1=Dropout(0.5)(inputs1)
+    fe2=Dense(256,activation='relu')(fe1)
+    #text sequence
+    inputs2=Input(shape=(max_length_of_caption,))
+    ts1=Embedding(vocab_size,256,mask_zero=True)(inputs2)
+    ts2=Dropout(0.5)(ts1)
+    ts3=LSTM(256)(ts2)
+    #feed forward network
+    n1=add([fe2,ts3])
+    n2=Dense(256,activation='relu')(n1)
+    outputs=Dense(vocab_size,activation='softmax')(n2)
+    model=Model(inputs=[inputs1,inputs2],outputs=outputs)
+    model.compile(loss='categorical_crossentropy',optimizer='adam')
+    model.summary()
+    plot_model(model,to_file='model.png',show_shapes=True)
+    return model
+model=def_model()
+
+load_img('/content/model.png')
+
+Training The Model
+
+epochs = 9
+for i in range(epochs):
+    
+        gen=generate(desc_dict,max_length_of_caption,vocab_size)
+        model.fit(gen,epochs=1,steps_per_epoch=6000,verbose=1)
+        model.save('model_'+'epoch'+str(i)+'.h5')
+
+model=load_model('/content/model_epoch9.h5')
+
+Making predictions
+
+actual=[]
+predicted=[]
+generated_caption={}
+def predictions():
+    
+       
+    testset_path='/content/drive/MyDrive/flickrtext/Flickr_8k.testImages.txt'
+    f=open(testset_path,'r')
+    for line in f:
+        in_text='startseq'   #intializing to kickstart the prediction
+        line=line.split('.')[0]
+        actual.append([d.split() for d in desc_dict[line]])
+        image_input=features[line]
+        image_input=image_input.reshape(2048,)
+        for i in range(max_length_of_caption):
+            sequence=[wordtoindex[w] for w in in_text.split() if w in wordtoindex]
+            sequence=pad_sequences([sequence],padding='post',maxlen=max_length_of_caption)[0]
+            image_input=np.array(image_input)
+            sequence=np.array(sequence)
+            image_input=image_input.reshape(1,-1)
+            sequence=sequence.reshape(1,-1)
+            nxt_word=model.predict([image_input,sequence],verbose=0)
+            nxt_word=np.argmax(nxt_word)
+            nxt_word=indextoword[nxt_word]
+            in_text=in_text +' '+nxt_word
+            if nxt_word =='endseq':
+                break
+        predicted.append(in_text.split())
+        generated_caption[line]=in_text 
+    
+    
+        
+predictions()
+
+Corpus Bleu score
+
+
+
+print("The Bleu score Bleu1 is",corpus_bleu(actual,generated_caption,weights=(1,0,0,0)))
+print("The Bleu Score Bleu2 is",corpus_bleu(actual,generated_caption,weights=(0.5,0.5,0,0)))
+print("The Bleu score Bleu3 is",corpus_bleu(actual,generated_caption,weights=(0.3,0.3,0.3,0)))
+print("The Bleu score Bleu4 is",corpus_bleu(actual,generated_caption,weights=(0.25,0.25,0.25,0.25)))
+
+model=load_model('/content/drive/MyDrive/model_epoch9.h5')
+
+def predict_caption(file_path): 
+   image_gen=InceptionV3(weights='imagenet')
+   image_gen=Model(inputs=image_gen.input,outputs=image_gen.layers[-2].output)
+   file_path=file_path
+   image_=load_img(file_path,target_size=(299,299))
+   image_=img_to_array(image_)
+   image_=image_.reshape((1,image_.shape[0],image_.shape[1],image_.shape[2]))
+   image_=preprocess_input(image_)
+   sequence_=image_gen.predict(image_,verbose=1)
+   sequence_=sequence_.reshape(2048,)
+   in_text='startseq'
+   for i in range(max_length_of_caption):
+            sequence=[wordtoindex[w] for w in in_text.split() if w in wordtoindex]
+            sequence=pad_sequences([sequence],padding='post',maxlen=max_length_of_caption)[0]
+            image_input=np.array(sequence_)
+            sequence=np.array(sequence)
+            image_input=image_input.reshape(1,-1)
+            sequence=sequence.reshape(1,-1)
+            nxt_word=model.predict([image_input,sequence],verbose=0)
+            nxt_word=np.argmax(nxt_word)
+            nxt_word=indextoword[nxt_word]
+            in_text=in_text +' '+nxt_word
+            if nxt_word =='endseq':
+                break
+        
+   return in_text
+
+
